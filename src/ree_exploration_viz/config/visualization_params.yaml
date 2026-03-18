@@ -1,0 +1,52 @@
+# ============================================================================
+# REE Exploration Visualization Parameters
+# ============================================================================
+
+ree_visualization_node:
+  ros__parameters:
+    # Map configuration
+    map_width: 100
+    map_height: 100
+    cell_size: 1.0
+
+    # Visualization settings
+    visualization_rate: 5.0  # Hz
+    mineral_threshold: 0.1   # Minimum concentration to display
+
+    # Feature toggles
+    show_underground: true
+    show_veins: true
+    show_clusters: true
+
+robot_marker_publisher:
+  ros__parameters:
+    num_robots: 4
+    cell_size: 1.0
+    trail_length: 50
+    detection_radius: 5.0
+
+mineral_heatmap_publisher:
+  ros__parameters:
+    map_width: 100
+    map_height: 100
+    cell_size: 1.0
+    heatmap_resolution: 2
+    contour_levels: 5
+    show_peak_labels: true
+
+# ============================================================================
+# Server visualization parameters
+# ============================================================================
+
+ree_exploration_server:
+  ros__parameters:
+    use_advanced_generator: true
+    enable_visualization: true
+
+# ============================================================================
+# Color scheme (for reference)
+# ============================================================================
+# REE_Oxides:     Red    (1.0, 0.0, 0.0)
+# REE_Silicates:  Green  (0.0, 1.0, 0.0)
+# REE_Phosphates: Blue   (0.0, 0.0, 1.0)
+# REE_Carbonates: Yellow (1.0, 1.0, 0.0)

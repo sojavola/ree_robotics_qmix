@@ -1,0 +1,36 @@
+# Paramètres QMIX
+qmix:
+  # Paramètres d'entraînement
+  gamma: 0.995
+  learning_rate: 0.0001
+  buffer_size: 5000
+  batch_size: 8
+  target_update_freq: 100
+  train_freq: 10
+  grad_clip: 10.0
+  n_steps: 5            # TD(n) : horizon de retour (5 = bon compromis biais/variance REE)
+
+  # Paramètres d'exploration
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 20000
+  
+  # Architecture réseau
+  hidden_dim: 64
+  hyper_dim: 64
+  
+  # Dimensions de l'environnement
+  map_width: 100
+  map_height: 100
+  num_actions: 8
+  num_robots: 4
+  
+  # Topics ROS
+  topics:
+    mineral_map: "/mineral_map"
+    obstacle_map: "/obstacle_map"
+    agent_position: "/robot_{}/position"
+    agent_action: "/robot_{}/action"
+    agent_exp: "/agent_experience"
+    trainer_update: "/qmix/weight_update"
+    trainer_epsilon: "/qmix/epsilon"

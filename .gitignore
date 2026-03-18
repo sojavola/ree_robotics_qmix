@@ -1,0 +1,37 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+*.so
+
+# Models / checkpoints (fichiers lourds)
+models/
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+
+# IDE
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Divers
+*.bag
+*.db3
