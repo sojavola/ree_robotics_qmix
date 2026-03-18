@@ -10,6 +10,7 @@
 Four autonomous robots explore a **100 × 100 cell** geological map to detect **rare earth mineral (REE)** deposits. The system is based on the **CTDE** paradigm *(Centralized Training, Decentralized Execution)*: training is centralized on a trainer node, execution is decentralized on each robot.
 
 
+```
                          ┌───────────────────────────────────────────┐
                          │           CENTRALIZED TRAINER             │
    ┌──────────────┐      │  ┌────────────┐      ┌─────────────────┐  │
@@ -23,6 +24,7 @@ Four autonomous robots explore a **100 × 100 cell** geological map to detect **
           │
    local obs. (20×20, 6 channels)    ──►  action (8 directions)
 
+```
 
 ## ROS2 Packages
 
