@@ -1,4 +1,4 @@
-# ree_robotics_qmix
+
 # REE Robotics QMIX
 
 > **Exploration coopérative multi-robot de minéraux de terres rares**
@@ -9,21 +9,6 @@
 ## Vue d'ensemble
 
 Quatre robots autonomes explorent une carte géologique de **100 × 100 cellules** pour détecter des gisements de **minéraux de terres rares (REE)**. Le système repose sur le paradigme **CTDE** *(Centralized Training, Decentralized Execution)* : l'entraînement est centralisé sur un nœud trainer, l'exécution est décentralisée sur chaque robot.
-
-
-                         ┌───────────────────────────────────────────┐
-                         │             TRAINER CENTRALISÉ            │
-   ┌──────────────┐      │  ┌────────────┐      ┌─────────────────┐  │
-   │   Robot 0    │─────►│  │   Replay   │      │   QMIX Network  │  │
-   │   Robot 1    │─────►│  │   Buffer   │─────►│  CNN + Mixing   │  │
-   │   Robot 2    │─────►│  │ (épisodes) │      │  TD(n=5) loss   │  │
-   │   Robot 3    │─────►│  └────────────┘      └────────┬────────┘  │
-   └──────┬───────┘      └───────────────────────────────┼───────────┘
-          │  ε, poids                                     │
-          └───────────────────────────────────────────────┘
-          │
-   obs. locale (20×20, 6 canaux)    ──►  action (8 directions)
-
 
 ## Packages ROS2
 
@@ -50,7 +35,7 @@ Q_tot(s, a) = f( Q_1(o_1, a_1), Q_2(o_2, a_2), ..., Q_N(o_N, a_N) )
 ### Architecture du réseau
 
 
-
+```bash
 
   Observation locale (20×20×6 canaux)
            │
@@ -79,7 +64,7 @@ Q_tot(s, a) = f( Q_1(o_1, a_1), Q_2(o_2, a_2), ..., Q_N(o_N, a_N) )
     └──────────────────────────────────────────────┘
            │
          Q_tot(s, a)   [scalaire]
-
+```
 
 
 
