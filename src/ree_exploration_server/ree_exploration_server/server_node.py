@@ -92,6 +92,13 @@ class REEExplorationServer(Node):
             )
         
         # === SUBSCRIBERS ===
+        # Reset épisode : le trainer signale la fin d'épisode → nouvelle carte
+        self.episode_reset_sub = self.create_subscription(
+            String, '/episode_reset',
+            self.episode_reset_callback, 10
+        )
+        self.episode_count = 0
+
         for i in range(self.num_robots):
             # Positions des robots
             self.create_subscription(
@@ -100,7 +107,7 @@ class REEExplorationServer(Node):
                 self.create_position_callback(i),
                 10
             )
-            
+
             # Actions de nettoyage
             self.create_subscription(
                 Float32MultiArray,
@@ -110,9 +117,8 @@ class REEExplorationServer(Node):
             )
         
         # === TIMERS ===
-        self.map_timer = self.create_timer(2.0, self.publish_maps)
+        self.map_timer = self.create_timer(0.5, self.publish_maps)
         self.status_timer = self.create_timer(5.0, self.publish_status)
-        self.update_timer = self.create_timer(1.0, self.update_system)
         
         # Timer pour les couches souterraines (si avancé)
         if self.generator_type == 'advanced':
@@ -261,18 +267,21 @@ class REEExplorationServer(Node):
                     self.obstacle_map[i, j] = 100
     
     def get_valid_start_position(self):
-        """Retourne une position de départ valide"""
-        while True:
+        """Retourne une position de départ valide (max 200 tentatives)."""
+        for _ in range(200):
             x = np.random.randint(10, self.map_width - 10)
             y = np.random.randint(10, self.map_height - 10)
-            
+
             if self.obstacle_map[y, x] == 0:
-                # Éviter les zones minérales très denses pour commencer
                 if self.generator_type == 'advanced':
                     if np.max(self.mineral_map[y, x, :]) < 0.8:
                         return (x, y)
                 else:
                     return (x, y)
+
+        # Fallback : retourner le centre de la carte si aucune position valide trouvée
+        self.get_logger().warn('get_valid_start_position: fallback au centre')
+        return (self.map_width // 2, self.map_height // 2)
     
     def update_exploration_map(self, x, y):
         """Met à jour la carte d'exploration"""
@@ -300,8 +309,53 @@ class REEExplorationServer(Node):
                 f'max={np.max(mineral_at_pos):.2f}'
             )
     
+    def episode_reset_callback(self, msg: String):
+        """Le trainer signale la fin d'un épisode → régénérer la carte."""
+        self.episode_count += 1
+        self.regenerate_map()
+
+    def regenerate_map(self):
+        """
+        Régénère une carte minérale aléatoire.
+
+        À chaque épisode, les dépôts changent de position.
+        Cela empêche les agents de mémoriser les emplacements et
+        les force à apprendre une vraie stratégie d'exploration.
+        """
+        with self.lock:
+            # Nouveau seed aléatoire pour chaque épisode
+            new_seed = np.random.randint(0, 100000)
+
+            if self.generator_type == 'advanced':
+                self.mineral_generator = AdvancedMineralGenerator(
+                    self.map_width, self.map_height, seed=new_seed
+                )
+                self.mineral_map = self.mineral_generator.generate_geological_map()
+                self.underground_layers = (
+                    self.mineral_generator.generate_underground_layers(
+                        self.mineral_map, num_layers=3
+                    )
+                )
+            else:
+                np.random.seed(new_seed)
+                self.mineral_map = self.mineral_generator.generate_mineral_map()
+
+            # Régénérer les obstacles en fonction de la nouvelle carte
+            self.generate_obstacles()
+
+            # Reset la carte d'exploration
+            self.exploration_map = np.zeros((self.map_height, self.map_width))
+
+            # Nouvelles positions de départ pour les robots
+            for i in range(self.num_robots):
+                self.robot_positions[i] = self.get_valid_start_position()
+
+        self.get_logger().info(
+            f'Carte regeneree (episode {self.episode_count}, seed={new_seed})'
+        )
+
     def update_system(self):
-        """Carte statique — les minéraux REE ne bougent pas entre les épisodes"""
+        """Pas de mise à jour intra-épisode — la carte est fixe pendant un épisode."""
         pass
     
     def publish_maps(self):

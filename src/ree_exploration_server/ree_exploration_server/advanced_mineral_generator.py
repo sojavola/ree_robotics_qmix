@@ -10,9 +10,11 @@ class AdvancedMineralGenerator:
     - Profil de concentration gaussien du centre vers les bords
     """
 
-    def __init__(self, width, height):
+    def __init__(self, width, height, seed=None):
         self.width = width
         self.height = height
+        if seed is not None:
+            np.random.seed(seed)
 
         # Propriétés géologiques de chaque type REE
         # n_deposits     : nombre de gisements sur la carte

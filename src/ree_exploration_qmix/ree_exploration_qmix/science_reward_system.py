@@ -97,39 +97,33 @@ class RealMineralRewardSystem:
                          is_new_position=False, has_collision=False,
                          step_count=0, sensor_data=None):
         """
-        Calcule la récompense ACADÉMIQUE hybride
-        Combine: heatmap simulée + données minérales réelles
+        Calcule la récompense basée sur les minéraux réels + bonus stratégiques.
+
+        La heatmap académique est supprimée (signal indépendant des vrais dépôts).
+        Signal = récompense minérale directe + bonus d'exploration/coverage.
         """
         x, y = position
         position_key = (int(x), int(y))
         self.total_steps += 1
 
-        # === 1. RÉCOMPENSE ACADÉMIQUE (heatmap) ===
-        academic_reward = self._calculate_academic_reward(position_key, has_collision, mineral_concentrations)
-
-        # === 2. RÉCOMPENSE RÉELLE (minéraux) ===
+        # === 1. RÉCOMPENSE MINÉRALE RÉELLE ===
         real_reward = self._calculate_real_mineral_reward(mineral_concentrations, position_key)
 
-        # === 3. COMBINAISON HYBRIDE (70% réel, 30% académique) ===
-        hybrid_reward = 0.7 * real_reward + 0.3 * academic_reward
-
-        # === 4. BONUS STRATÉGIQUES ===
+        # === 2. BONUS STRATÉGIQUES (exploration, coverage, efficiency) ===
         strategic_bonus = self._calculate_strategic_bonus(position_key, step_count)
-        hybrid_reward += strategic_bonus
 
-        # === 5. DIFFUSION GAUSSIENNE ===
-        self._update_gaussian_diffusion()
+        reward = real_reward + strategic_bonus
 
-        # === 6. MISE À JOUR ===
+        # === 3. MISE À JOUR ===
         self._update_tracking(position_key, is_new_position, real_reward > 0)
-        self.total_reward += hybrid_reward
-        self.academic_reward_total += academic_reward
+        self.total_reward += reward
         self.real_reward_total += real_reward
+        self.academic_reward_total = 0.0  # Désactivé
 
-        if np.isnan(hybrid_reward) or np.isinf(hybrid_reward):
+        if np.isnan(reward) or np.isinf(reward):
             return 0.0
 
-        return hybrid_reward
+        return reward
 
     def _calculate_academic_reward(self, position_key, has_collision, mineral_concentrations=None):
         """

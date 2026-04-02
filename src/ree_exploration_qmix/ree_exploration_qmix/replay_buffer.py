@@ -1,48 +1,54 @@
 #!/usr/bin/env python3
+"""
+Replay buffer pour QMIX — stocke des épisodes complets.
+
+Supporte les données additionnelles pour les 3 contributions :
+  - regional_maps : observations régionales (multi-scale)
+  - Les messages de communication sont recalculés pendant l'entraînement
+    (pas besoin de les stocker — ils dépendent des features CNN)
+  - Les features ICM sont recalculés pendant l'entraînement
+"""
 
 import numpy as np
 import torch
 from collections import deque
 import random
 
+
 class QMIXReplayBuffer:
-    """Replay buffer pour QMIX qui stocke des épisodes complets"""
-    
+    """Replay buffer pour QMIX qui stocke des épisodes complets."""
+
     def __init__(self, buffer_size, batch_size, num_robots, device='cpu'):
         self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.num_robots = num_robots
         self.device = device
-        
-        # Buffer circulaire d'épisodes
+
         self.episodes = deque(maxlen=buffer_size)
-        
+
     def add_episode(self, episode_data):
         """
-        Ajoute un épisode complet au buffer
-        
+        Ajoute un épisode complet au buffer.
+
         episode_data: dict avec
-            - 'mineral_maps': list of arrays (T, C, H, W) pour chaque robot
-            - 'positions': list of arrays (T, 2) pour chaque robot
-            - 'actions': list of arrays (T,) pour chaque robot
-            - 'rewards': list of arrays (T,) pour chaque robot
-            - 'global_states': array (T, C, H, W)
-            - 'dones': array (T,)
-            - 'avail_actions': optional list of arrays (T, num_actions)
+            - 'mineral_maps':   list of arrays (T, C, H, W) par robot
+            - 'positions':      list of arrays (T, 2) par robot
+            - 'actions':        list of arrays (T,) par robot
+            - 'rewards':        list of arrays (T,) par robot
+            - 'global_states':  array (T, C, H, W)
+            - 'dones':          array (T,)
+            - 'regional_maps':  list of arrays (T, C, H, W) par robot (optionnel)
         """
         self.episodes.append(episode_data)
-        
+
     def sample_batch(self):
-        """Échantillonne un batch d'épisodes"""
+        """Échantillonne un batch d'épisodes."""
         batch_size = min(self.batch_size, len(self.episodes))
         episodes = random.sample(self.episodes, batch_size)
-        
-        # Préparer les données batch
-        batch_data = self._prepare_batch(episodes)
-        return batch_data
-    
+        return self._prepare_batch(episodes)
+
     def _pad_to(self, arr, target_len, pad_value=0):
-        """Pad ou tronque un numpy array à target_len sur l'axe 0"""
+        """Pad ou tronque un numpy array à target_len sur l'axe 0."""
         arr = np.array(arr)
         cur_len = len(arr)
         if cur_len >= target_len:
@@ -51,10 +57,9 @@ class QMIXReplayBuffer:
         return np.pad(arr, pad_shape, mode='constant', constant_values=pad_value)
 
     def _prepare_batch(self, episodes):
-        """Prépare un batch d'épisodes pour l'entraînement"""
+        """Prépare un batch d'épisodes pour l'entraînement."""
         batch_size = len(episodes)
 
-        # Longueur max sur TOUTES les données (global_states ET mineral_maps)
         max_len = max(
             max(len(np.array(ep['global_states'])) for ep in episodes),
             max(len(np.array(ep['mineral_maps'][i]))
@@ -64,9 +69,13 @@ class QMIXReplayBuffer:
         device = self.device
 
         mineral_maps = [[] for _ in range(self.num_robots)]
-        positions = [[] for _ in range(self.num_robots)]
-        actions = [[] for _ in range(self.num_robots)]
-        rewards = [[] for _ in range(self.num_robots)]
+        positions    = [[] for _ in range(self.num_robots)]
+        actions      = [[] for _ in range(self.num_robots)]
+        rewards      = [[] for _ in range(self.num_robots)]
+
+        # Multi-scale : regional_maps (optionnel)
+        has_regional = any('regional_maps' in ep for ep in episodes)
+        regional_maps = [[] for _ in range(self.num_robots)] if has_regional else None
 
         global_states = []
         next_global_states = []
@@ -84,6 +93,17 @@ class QMIXReplayBuffer:
                 actions[i].append(torch.LongTensor(act).to(device))
                 rewards[i].append(torch.FloatTensor(rew).to(device))
 
+                # Regional maps (multi-scale)
+                if has_regional and 'regional_maps' in ep:
+                    reg = self._pad_to(ep['regional_maps'][i], max_len)
+                    regional_maps[i].append(torch.FloatTensor(reg).to(device))
+                elif has_regional:
+                    # Padding si cet épisode n'a pas de regional_maps
+                    dummy_shape = maps.shape  # Same shape as mineral_maps
+                    regional_maps[i].append(
+                        torch.zeros_like(torch.FloatTensor(maps)).to(device)
+                    )
+
             states = np.array(ep['global_states'])
             if 'next_global_states' in ep:
                 next_states = np.array(ep['next_global_states'])
@@ -91,24 +111,31 @@ class QMIXReplayBuffer:
                 next_states = np.zeros_like(states)
                 next_states[:-1] = states[1:]
 
-            global_states.append(torch.FloatTensor(self._pad_to(states, max_len)).to(device))
-            next_global_states.append(torch.FloatTensor(self._pad_to(next_states, max_len)).to(device))
-
+            global_states.append(
+                torch.FloatTensor(self._pad_to(states, max_len)).to(device)
+            )
+            next_global_states.append(
+                torch.FloatTensor(self._pad_to(next_states, max_len)).to(device)
+            )
             ep_dones = self._pad_to(ep['dones'], max_len, pad_value=1)
             dones.append(torch.BoolTensor(ep_dones).to(device))
-        
-        # Empiler
+
         batch_data = {
-            'mineral_maps': [torch.stack(maps, dim=1) for maps in mineral_maps],  # (T, B, C, H, W)
-            'positions': [torch.stack(pos, dim=1) for pos in positions],  # (T, B, 2)
-            'actions': [torch.stack(act, dim=1) for act in actions],  # (T, B)
-            'rewards': [torch.stack(rew, dim=1) for rew in rewards],  # (T, B)
-            'global_states': torch.stack(global_states, dim=1),  # (T, B, C, H, W)
-            'next_global_states': torch.stack(next_global_states, dim=1),  # (T, B, C, H, W)
-            'dones': torch.stack(dones, dim=1)  # (T, B)
+            'mineral_maps':      [torch.stack(maps, dim=1) for maps in mineral_maps],
+            'positions':         [torch.stack(pos, dim=1) for pos in positions],
+            'actions':           [torch.stack(act, dim=1) for act in actions],
+            'rewards':           [torch.stack(rew, dim=1) for rew in rewards],
+            'global_states':     torch.stack(global_states, dim=1),
+            'next_global_states': torch.stack(next_global_states, dim=1),
+            'dones':             torch.stack(dones, dim=1),
         }
-        
+
+        if has_regional and regional_maps is not None:
+            batch_data['regional_maps'] = [
+                torch.stack(reg, dim=1) for reg in regional_maps
+            ]
+
         return batch_data
-    
+
     def __len__(self):
         return len(self.episodes)

@@ -27,6 +27,45 @@ source install/setup.bash
 ros2 launch ree_exploration_viz visualization.launch.py use_rviz:=false
 Avant tout — Build les 3 packages
 
-cd /media/sojavola/SOJAVOLA1/STAGE/stage_M2_PRISMALAB/projet/ree_robotics_qmix/src
-colcon build
+cd /media/sojavola/SOJAVOLA1/STAGE/stage_M2_PRISMALAB/projet/ree_robotics_qmix
+colcon build --symlink-install
 source install/setup.bash
+
+tensorboard :
+cd /media/sojavola/SOJAVOLA1/STAGE/stage_M2_PRISMALAB/projet/ree_robotics_qmix
+tensorboard --logdir logs/tensorboard
+
+
+
+
+39 stepsOui, j'ai accès à votre TensorBoard ! Il tourne sur localhost:6006 et affiche les métriques d'un entraînement QMIX (multi-agent reinforcement learning) provenant du run /home/sojavola/.qmix/tensorboard. Voici un résumé de ce que je vois :
+Section "Episode" (7 graphiques) — ~70 épisodes d'entraînement :
+
+Episode/AvgReward : La récompense moyenne par épisode monte jusqu'à environ 60-100 autour de l'épisode 30, puis fluctue et redescend vers 20-40 en fin d'entraînement. Il y a une instabilité notable.
+Episode/BufferSize : La taille du buffer de replay croît, atteint un pic ~25 vers l'épisode 20 puis diminue progressivement vers ~2.
+Episode/Epsilon : L'epsilon reste très élevé (~0.986), donc l'exploration est encore quasi maximale — l'entraînement semble en être à un stade très précoce.
+Episode/MineralsDetected : Augmentation progressive de ~30 à ~300, ce qui est un bon signe.
+Episode/Steps : Le nombre de steps par épisode monte à ~300 et se stabilise.
+Episode/TotalReward : Croissance exponentielle de ~4k à ~2e4 (20 000).
+Episode/TotalReward_MA10 : La moyenne mobile sur 10 épisodes confirme la tendance haussière, montant jusqu'à ~2.8e4.
+
+Section "Eval" (3 graphiques) — seulement 2 évaluations :
+
+Eval/AvgReward : ~1e4 au point d'évaluation 2.
+Eval/AvgRewardPerStep : ~30 environ.
+Eval/AvgSteps : ~320 steps en moyenne lors de l'évaluation.
+
+Section "Robots" (8 graphiques) — métriques par robot (Robot0 à Robot3), steps ~98 à ~108 :
+
+Robot0 : Collecte des minerais (pic à ~70 puis chute), récompense qui monte puis redescend.
+Robot1 : Beaucoup de minerais collectés (pic ~200), récompense élevée (~3.2e4 puis baisse).
+Robot2 : Minerais collectés qui montent progressivement (~30), récompense en hausse (~6e3).
+Robot3 : Quasi aucun minerai collecté (~0), récompense faible et instable (~600-2600). Ce robot semble ne pas contribuer efficacement.
+
+Section "Train" (5 graphiques) — cette section est repliée, je n'ai pas pu l'ouvrir sans provoquer un changement de page.
+Observations générales :
+
+L'entraînement est encore très précoce (epsilon ~0.986, peu d'épisodes).
+La TotalReward montre une tendance positive encourageante.
+Il y a un déséquilibre entre les robots : Robot1 domine la collecte de minerais tandis que Robot3 est quasi inactif.
+Les performances des robots semblent décroître dans les derniers steps visibles (surtout Robot0 et Robot1), ce qui peut indiquer un besoin de plus d'épisodes d'entraînement.
