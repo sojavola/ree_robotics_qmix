@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.ndimage import gaussian_filter, sobel, label, binary_dilation
+from scipy.ndimage import gaussian_filter, label, binary_dilation
 
 
 class AdvancedMineralGenerator:
@@ -13,8 +13,8 @@ class AdvancedMineralGenerator:
     def __init__(self, width, height, seed=None):
         self.width = width
         self.height = height
-        if seed is not None:
-            np.random.seed(seed)
+        # Fix D : RNG local — évite de corrompre le générateur global NumPy
+        self.rng = np.random.default_rng(seed)
 
         # Propriétés géologiques de chaque type REE
         # n_deposits     : nombre de gisements sur la carte
@@ -59,7 +59,9 @@ class AdvancedMineralGenerator:
     # ──────────────────────────────────────────────────────────────────
     def generate_geological_map(self, seed=0):
         """Génère la carte minérale. Même seed = même carte."""
-        np.random.seed(seed)
+        # Fix D : ré-initialiser le RNG local avec le seed fourni (reproducibilité)
+        # sans toucher au générateur global NumPy
+        self.rng = np.random.default_rng(seed)
         mineral_map = np.zeros((self.height, self.width, len(self.mineral_types)))
 
         for idx, (name, props) in enumerate(self.mineral_types.items()):
@@ -91,7 +93,7 @@ class AdvancedMineralGenerator:
         zone_h = (self.height - 2 * margin) / n_zones_y
 
         all_zones = [(zi, zj) for zi in range(n_zones_x) for zj in range(n_zones_y)]
-        np.random.shuffle(all_zones)
+        self.rng.shuffle(all_zones)
         chosen_zones = all_zones[:n]
 
         for zi, zj in chosen_zones:
@@ -100,24 +102,30 @@ class AdvancedMineralGenerator:
             y_lo = int(margin + zj * zone_h)
             y_hi = int(margin + (zj + 1) * zone_h)
 
-            cx = np.random.randint(max(margin, x_lo), min(self.width  - margin, x_hi) + 1)
-            cy = np.random.randint(max(margin, y_lo), min(self.height - margin, y_hi) + 1)
-            r  = np.random.uniform(r_min, r_max)
+            # Fix C : safe randint — évite le crash quand low >= high
+            # (peut arriver si la zone est plus étroite que margin)
+            cx_lo = max(margin, x_lo)
+            cx_hi = max(cx_lo + 1, min(self.width  - margin, x_hi) + 1)
+            cy_lo = max(margin, y_lo)
+            cy_hi = max(cy_lo + 1, min(self.height - margin, y_hi) + 1)
+            cx = int(self.rng.integers(cx_lo, cx_hi))
+            cy = int(self.rng.integers(cy_lo, cy_hi))
+            r  = float(self.rng.uniform(r_min, r_max))
 
             # Ellipse peu allongée → clusters circulaires, pas de lignes
-            angle = np.random.uniform(0, np.pi)
-            ratio = np.random.uniform(0.60, 0.95)
+            angle = float(self.rng.uniform(0, np.pi))
+            ratio = float(self.rng.uniform(0.60, 0.95))
 
             dx = (xx - cx) * np.cos(angle) + (yy - cy) * np.sin(angle)
             dy = -(xx - cx) * np.sin(angle) + (yy - cy) * np.cos(angle)
             dist2 = dx ** 2 + (dy / ratio) ** 2
 
-            peak_actual = peak * np.random.uniform(0.70, 1.0)
+            peak_actual = peak * float(self.rng.uniform(0.70, 1.0))
             sigma = r / 2.5
             gaussian = peak_actual * np.exp(-dist2 / (2 * sigma ** 2))
             mask = dist2 <= (r * 1.1) ** 2
 
-            noise = 1.0 + np.random.uniform(-0.06, 0.06, size=(self.height, self.width))
+            noise = 1.0 + self.rng.uniform(-0.06, 0.06, size=(self.height, self.width))
             layer = np.maximum(layer, gaussian * noise * mask)
 
         return np.clip(layer, 0.0, 1.0)

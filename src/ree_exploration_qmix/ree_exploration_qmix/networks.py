@@ -64,7 +64,7 @@ class CNNEncoder(nn.Module):
     def forward(self, x):
         """x: (batch, C, H, W) → (batch, hidden_dim)"""
         x = self.get_feature_maps(x)
-        x = self.dropout(F.relu(self.fc(x.view(x.size(0), -1))))
+        x = self.dropout(F.relu(self.fc(x.reshape(x.size(0), -1))))
         return x
 
 
@@ -380,7 +380,7 @@ class StateEncoder(nn.Module):
         x = F.relu(self.conv1(state))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
-        return F.relu(self.fc(x.view(x.size(0), -1)))
+        return F.relu(self.fc(x.reshape(x.size(0), -1)))
 
 
 # ═══════════════════════════════════════════════════════════════════════

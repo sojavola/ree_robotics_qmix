@@ -2,35 +2,51 @@
 qmix:
   # Paramètres d'entraînement
   gamma: 0.995
-  learning_rate: 0.0001
-  buffer_size: 5000
-  batch_size: 8
-  target_update_freq: 100
+  learning_rate: 0.00001     # 5e-5 → 1e-5 : stabilise GradNorm (était ~3000)
+  buffer_size: 200           # 80→200 : évite catastrophic forgetting (les vieux bons épisodes restent en mémoire)
+  batch_size: 16             # 8→16 : réduit variance des gradients, RAM disponible = 16 GB
+  target_update_freq: 50     # 100→50 : cible suit mieux → réduit dérive des Q-values
   train_freq: 10
-  grad_clip: 10.0
-  n_steps: 5            # TD(n) : horizon de retour (5 = bon compromis biais/variance REE)
+  grad_clip: 1.0
+  n_steps: 5
 
   # Paramètres d'exploration
   epsilon_start: 1.0
-  epsilon_end: 0.05
-  epsilon_decay: 20000
-  
+  epsilon_end: 0.10          # 0.05→0.10 : plancher permanent d'exploration (évite collapse quand epsilon=0)
+  epsilon_decay: 9000        # 4000→9000 : decay jusqu'à ep ~1550 (était ep ~690 → collapse confirmé)
+
   # Architecture réseau
   hidden_dim: 64
   hyper_dim: 64
-  
+
   # Dimensions de l'environnement
   map_width: 100
   map_height: 100
   num_actions: 8
   num_robots: 4
-  
+
+  # Coverage bonus (remplace Geo-ICM)
+  # r_coverage = coverage_weight par nouvelle cellule visitée dans l'épisode
+  coverage_weight: 0.5
+
+  # Capteur
+  sensor_noise_std: 0.02
+
+  # Multi-Scale
+  use_multi_scale: true
+  regional_obs_size: 60
+  regional_scale: 3
+
+  # Communication
+  use_comm: true
+  comm_dim: 32
+  num_comm_rounds: 1
+
   # Topics ROS
   topics:
     mineral_map: "/mineral_map"
     obstacle_map: "/obstacle_map"
-    agent_position: "/robot_{}/position"
-    agent_action: "/robot_{}/action"
     agent_exp: "/agent_experience"
     trainer_update: "/qmix/weight_update"
     trainer_epsilon: "/qmix/epsilon"
+    comm: "/qmix/comm"

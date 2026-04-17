@@ -2,11 +2,10 @@
 """
 Replay buffer pour QMIX — stocke des épisodes complets.
 
-Supporte les données additionnelles pour les 3 contributions :
+Contributions supportées :
   - regional_maps : observations régionales (multi-scale)
-  - Les messages de communication sont recalculés pendant l'entraînement
-    (pas besoin de les stocker — ils dépendent des features CNN)
-  - Les features ICM sont recalculés pendant l'entraînement
+  - Communication : recalculée pendant l'entraînement (pas stockée)
+  - Coverage bonus : calculé dans science_reward_system, stocké dans rewards
 """
 
 import numpy as np
@@ -16,7 +15,7 @@ import random
 
 
 class QMIXReplayBuffer:
-    """Replay buffer pour QMIX qui stocke des épisodes complets."""
+    """Replay buffer QMIX à taille fixe (deque circulaire)."""
 
     def __init__(self, buffer_size, batch_size, num_robots, device='cpu'):
         self.buffer_size = buffer_size
@@ -34,8 +33,8 @@ class QMIXReplayBuffer:
             - 'mineral_maps':   list of arrays (T, C, H, W) par robot
             - 'positions':      list of arrays (T, 2) par robot
             - 'actions':        list of arrays (T,) par robot
-            - 'rewards':        list of arrays (T,) par robot
-            - 'global_states':  array (T, C, H, W)
+            - 'rewards':        list of arrays (T,) par robot  (extrinsic + coverage)
+            - 'global_states':  array (T, C, H, W)  [float16 en mémoire]
             - 'dones':          array (T,)
             - 'regional_maps':  list of arrays (T, C, H, W) par robot (optionnel)
         """
@@ -73,7 +72,6 @@ class QMIXReplayBuffer:
         actions      = [[] for _ in range(self.num_robots)]
         rewards      = [[] for _ in range(self.num_robots)]
 
-        # Multi-scale : regional_maps (optionnel)
         has_regional = any('regional_maps' in ep for ep in episodes)
         regional_maps = [[] for _ in range(self.num_robots)] if has_regional else None
 
@@ -93,20 +91,17 @@ class QMIXReplayBuffer:
                 actions[i].append(torch.LongTensor(act).to(device))
                 rewards[i].append(torch.FloatTensor(rew).to(device))
 
-                # Regional maps (multi-scale)
                 if has_regional and 'regional_maps' in ep:
                     reg = self._pad_to(ep['regional_maps'][i], max_len)
                     regional_maps[i].append(torch.FloatTensor(reg).to(device))
                 elif has_regional:
-                    # Padding si cet épisode n'a pas de regional_maps
-                    dummy_shape = maps.shape  # Same shape as mineral_maps
-                    regional_maps[i].append(
-                        torch.zeros_like(torch.FloatTensor(maps)).to(device)
-                    )
+                    dummy = np.zeros_like(maps)
+                    regional_maps[i].append(torch.FloatTensor(dummy).to(device))
 
-            states = np.array(ep['global_states'])
+            # float32 : reconvertit depuis float16 stocké en mémoire (Fix J)
+            states = np.array(ep['global_states'], dtype=np.float32)
             if 'next_global_states' in ep:
-                next_states = np.array(ep['next_global_states'])
+                next_states = np.array(ep['next_global_states'], dtype=np.float32)
             else:
                 next_states = np.zeros_like(states)
                 next_states[:-1] = states[1:]
@@ -121,13 +116,13 @@ class QMIXReplayBuffer:
             dones.append(torch.BoolTensor(ep_dones).to(device))
 
         batch_data = {
-            'mineral_maps':      [torch.stack(maps, dim=1) for maps in mineral_maps],
-            'positions':         [torch.stack(pos, dim=1) for pos in positions],
-            'actions':           [torch.stack(act, dim=1) for act in actions],
-            'rewards':           [torch.stack(rew, dim=1) for rew in rewards],
-            'global_states':     torch.stack(global_states, dim=1),
+            'mineral_maps':       [torch.stack(maps, dim=1) for maps in mineral_maps],
+            'positions':          [torch.stack(pos,  dim=1) for pos  in positions],
+            'actions':            [torch.stack(act,  dim=1) for act  in actions],
+            'rewards':            [torch.stack(rew,  dim=1) for rew  in rewards],
+            'global_states':      torch.stack(global_states,      dim=1),
             'next_global_states': torch.stack(next_global_states, dim=1),
-            'dones':             torch.stack(dones, dim=1),
+            'dones':              torch.stack(dones,              dim=1),
         }
 
         if has_regional and regional_maps is not None:

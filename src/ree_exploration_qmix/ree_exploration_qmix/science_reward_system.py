@@ -2,65 +2,80 @@
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
+from collections import deque
 
 
 class RealMineralRewardSystem:
     """
-    Système de récompenses RÉEL basé sur la logique académique
-    avec heatmap, diffusion gaussienne et équation de Bellman
+    Système de récompenses basé sur les minéraux réels + coverage bonus.
+
+    Le coverage bonus remplace le Geo-ICM : récompense proportionnelle aux
+    nouvelles cellules découvertes dans l'épisode courant.
+    r_coverage = coverage_weight  pour chaque cellule jamais visitée cet épisode.
     """
 
-    def __init__(self, grid_size=(100, 100), robot_id=0):
+    def __init__(self, grid_size=(100, 100), robot_id=0, coverage_weight=0.5):
         self.grid_size = grid_size
         self.robot_id = robot_id
+        self.coverage_weight = coverage_weight
 
-        # === CONFIGURATION ACADÉMIQUE OPTIMISÉE ===
         self.reward_config = {
-            # === PARAMÈTRES ACADÉMIQUES (comme dans l'article) ===
-            'academic_penalty': -2.0,           # Pénalité standard académique
-            'clean_threshold': 0.5,             # Seuil élevé → heatmap réellement sparse
-            'gaussian_sigma': 0.9,              # σ pour diffusion gaussienne
-            'gaussian_update_freq': 15,         # ψ = 15 pas de temps
-            'discount_factor': 0.99,            # γ pour Bellman
+            # === RÉCOMPENSES MINÉRALES ===
+            'mineral_base_reward': 50.0,
+            'concentration_multiplier': 30.0,
+            'high_concentration_bonus': 30.0,
+            'mineral_threshold': 0.3,
 
-            # === RÉCOMPENSES MINÉRALES (calibrées) ===
-            'mineral_base_reward': 50.0,        # Réduit pour éviter faux positifs
-            'concentration_multiplier': 30.0,   # Multiplicateur plus réaliste
-            'high_concentration_bonus': 30.0,   # Bonus pour > 0.7
+            # === EXPLORATION ===
+            'exploration_bonus': 1.0,       # bonus supplémentaire nouvelle cellule
+            'new_zone_bonus': 2.0,          # bonus supplémentaire dans les 50 premiers steps
 
-            # === SEUIL MINÉRAL RÉEL ===
-            'mineral_threshold': 0.3,           # Concentration minimale pour compter
+            # === PÉNALITÉS ===
+            'step_penalty': -0.05,
+            'collision_penalty': -5.0,
+            'revisiting_penalty': -0.5,
 
-            # === EXPLORATION ACADÉMIQUE ===
-            'exploration_bonus': 1.0,           # Très faible comme dans l'article
-            'new_zone_bonus': 2.0,              # Pour nouvelles zones
+            # === COVERAGE (remplace ICM) ===
+            # r_coverage = coverage_weight × 1 si cellule nouvelle dans l'épisode
+            # cf. __init__ coverage_weight
 
-            # === PÉNALITÉS ACADÉMIQUES ===
-            'step_penalty': -0.05,              # Pénalité par pas (légère)
-            'collision_penalty': -5.0,          # Pour collisions
-            'revisiting_penalty': -0.5,         # Pour zones revisitées
+            # === EFFICACITÉ ===
+            'efficiency_bonus': 0.3,
 
-            # === BONUS STRATÉGIQUES ===
-            'coverage_bonus': 0.02,             # Par % de carte exploré
-            'efficiency_bonus': 0.3,            # Pour minéraux/steps
+            # === Paramètres académiques (conservés pour heatmap legacy) ===
+            'academic_penalty': -2.0,
+            'clean_threshold': 0.5,
+            'gaussian_sigma': 0.9,
+            'gaussian_update_freq': 15,
+            'discount_factor': 0.99,
         }
 
-        # === HEATMAP ACADÉMIQUE (simulée) ===
+        # === HEATMAP (conservée pour compatibilité legacy) ===
         self.academic_heatmap = self._initialize_academic_heatmap()
 
-        # === SUIVI DES MINÉRAUX RÉELS ===
+        # === SUIVI DES MINÉRAUX ===
         self.minerals_collected = 0
         self.steps_without_mineral = 0
         self.last_mineral_position = None
         self.mineral_positions = []
+        self.mineral_positions_set = set()
         self.concentration_history = []
+
+        # Compteur de visites par case (decay exponentiel revisit)
+        self.visit_counts: dict = {}
+        # Historique 10 dernières positions (anti-loop penalty)
+        self._recent_positions: deque = deque(maxlen=10)
+
+        # === COVERAGE — cellules visitées CET épisode ===
+        # Réinitialisé à chaque reset_episode()
+        self._episode_visited: set = set()
 
         # === SUIVI EXPLORATION ===
         self.visited_positions = set()
         self.cleaned_positions = set()
         self.unique_positions_count = 0
 
-        # === COMPTEURS GAUSSIENS ===
+        # === COMPTEURS ===
         self.gaussian_step = 0
         self.total_steps = 0
 
@@ -70,13 +85,17 @@ class RealMineralRewardSystem:
         self.real_reward_total = 0.0
         self.episode_rewards = []
 
+        # === COMPOSANTES REWARD — pour TensorBoard (Priorité 4) ===
+        # Accumulées par épisode, remises à 0 dans reset_episode()
+        self._ep_mineral: float = 0.0   # Reward/Mineral
+        self._ep_coverage: float = 0.0  # Reward/Coverage
+        self._ep_penalty: float = 0.0   # Reward/Penalty
+
     def _initialize_academic_heatmap(self):
-        """Initialise la heatmap académique SPARSE (quelques dépôts concentrés)"""
+        """Initialise la heatmap académique sparse (6 dépôts localisés)."""
         height, width = self.grid_size
-        # Commencer avec des valeurs très basses (fond = 0)
         heatmap = np.zeros((height, width), dtype=np.float32)
 
-        # Seulement 6 dépôts localisés au lieu de bruit uniforme
         for _ in range(6):
             x = np.random.randint(15, width - 15)
             y = np.random.randint(15, height - 15)
@@ -89,7 +108,6 @@ class RealMineralRewardSystem:
                         concentration = 0.9 * (1.0 - distance / radius)
                         heatmap[i, j] = max(heatmap[i, j], concentration)
 
-        # Légère diffusion pour rendre les bords doux
         heatmap = gaussian_filter(heatmap, sigma=1.5)
         return np.clip(heatmap, 0, 1)
 
@@ -97,73 +115,49 @@ class RealMineralRewardSystem:
                          is_new_position=False, has_collision=False,
                          step_count=0, sensor_data=None):
         """
-        Calcule la récompense basée sur les minéraux réels + bonus stratégiques.
+        Calcule la récompense : minérale + coverage bonus + pénalités.
 
-        La heatmap académique est supprimée (signal indépendant des vrais dépôts).
-        Signal = récompense minérale directe + bonus d'exploration/coverage.
+        Coverage bonus = coverage_weight si la cellule est nouvelle dans cet épisode.
+        Remplace le Geo-ICM qui ajoutait du bruit dans les environnements à
+        carte régénérée aléatoirement.
         """
         x, y = position
         position_key = (int(x), int(y))
         self.total_steps += 1
 
-        # === 1. RÉCOMPENSE MINÉRALE RÉELLE ===
+        # Vérifier AVANT que _calculate_strategic_bonus n'ajoute à _episode_visited
+        _is_new_ep = position_key not in self._episode_visited
+
+        # === 1. RÉCOMPENSE MINÉRALE ===
         real_reward = self._calculate_real_mineral_reward(mineral_concentrations, position_key)
 
-        # === 2. BONUS STRATÉGIQUES (exploration, coverage, efficiency) ===
+        # === 2. COVERAGE BONUS + PÉNALITÉS ===
         strategic_bonus = self._calculate_strategic_bonus(position_key, step_count)
 
         reward = real_reward + strategic_bonus
 
-        # === 3. MISE À JOUR ===
+        # === 3. ACCUMULATEURS COMPOSANTES (TensorBoard Reward/*) ===
+        self._ep_mineral += real_reward
+        if _is_new_ep:
+            self._ep_coverage += self.coverage_weight
+        # Tout le reste du strategic_bonus = pénalités (step_penalty + anti-loop)
+        self._ep_penalty += strategic_bonus - (self.coverage_weight if _is_new_ep else 0.0)
+
+        # === 4. MISE À JOUR ===
         self._update_tracking(position_key, is_new_position, real_reward > 0)
         self.total_reward += reward
         self.real_reward_total += real_reward
-        self.academic_reward_total = 0.0  # Désactivé
+        self.academic_reward_total = 0.0
 
         if np.isnan(reward) or np.isinf(reward):
             return 0.0
 
         return reward
 
-    def _calculate_academic_reward(self, position_key, has_collision, mineral_concentrations=None):
-        """
-        Calcule la récompense académique: cpi = Σ(s(j,l) × xi(j,l))
-        Si la cellule contient des minéraux REE, la pénalité de revisitation
-        ne s'applique pas — le robot doit pouvoir exploiter les gisements.
-        """
-        x, y = position_key
-
-        if not (0 <= y < self.grid_size[0] and 0 <= x < self.grid_size[1]):
-            return self.reward_config['academic_penalty']
-
-        if has_collision:
-            return self.reward_config['collision_penalty']
-
-        # Vérifier si la cellule contient des minéraux REE
-        max_concentration = 0.0
-        if mineral_concentrations:
-            max_concentration = max(mineral_concentrations)
-
-        if position_key in self.cleaned_positions:
-            # Cellule REE riche : pas de pénalité, reward partiel d'exploitation
-            if max_concentration >= self.reward_config['mineral_threshold']:
-                return max_concentration * self.reward_config['mineral_base_reward'] * 0.4
-            # Cellule vide revisitée : pénalité normale
-            return self.reward_config['revisiting_penalty']
-
-        heatmap_value = self.academic_heatmap[y, x]
-
-        if heatmap_value < self.reward_config['clean_threshold']:
-            return self.reward_config['academic_penalty']
-
-        academic_reward = heatmap_value * self.reward_config['mineral_base_reward']
-        self.academic_heatmap[y, x] *= 0.1
-        self.cleaned_positions.add(position_key)
-
-        return academic_reward
-
     def _calculate_real_mineral_reward(self, concentrations, position_key):
-        """Calcule la récompense pour minéraux réels"""
+        """
+        Récompense pour minéraux réels avec decay exponentiel sur revisit.
+        """
         if not concentrations:
             return 0.0
 
@@ -173,10 +167,18 @@ class RealMineralRewardSystem:
             self.steps_without_mineral += 1
             return 0.0
 
-        mineral_reward = 0.0
         self.steps_without_mineral = 0
 
-        mineral_reward += max_concentration * self.reward_config['mineral_base_reward']
+        if position_key in self.mineral_positions_set:
+            # Decay exponentiel : évite le farming sur la même case
+            visit_count = self.visit_counts.get(position_key, 1)
+            decay = 0.05 / (1.0 + visit_count * 0.5)
+            revisit_reward = max_concentration * self.reward_config['mineral_base_reward'] * decay
+            self.visit_counts[position_key] = visit_count + 1
+            return revisit_reward
+
+        # Première visite : reward plein
+        mineral_reward = max_concentration * self.reward_config['mineral_base_reward']
         mineral_reward += max_concentration * self.reward_config['concentration_multiplier']
 
         if max_concentration > 0.7:
@@ -184,63 +186,57 @@ class RealMineralRewardSystem:
 
         self.minerals_collected += 1
         self.mineral_positions.append(position_key)
+        self.mineral_positions_set.add(position_key)
+        self.visit_counts[position_key] = 1
         self.concentration_history.append(max_concentration)
         self.last_mineral_position = position_key
 
         return mineral_reward
 
     def _calculate_strategic_bonus(self, position_key, step_count):
-        """Bonus stratégiques pour comportements intelligents"""
+        """
+        Bonus stratégiques :
+          - Coverage bonus : reward si cellule nouvelle cet épisode (Fix C)
+          - Pénalité anti-loop : pénalise les trajectoires circulaires
+          - Step penalty : légère pénalité par pas (encourage l'efficacité)
+
+        Supprimés (Fix B/C) :
+          - exploration_bonus / new_zone_bonus : redondants avec coverage_weight,
+            gonflaient les rewards pendant la phase d'exploration aléatoire
+          - efficiency_bonus × 100 : trop agressif, distordait le signal TD
+        """
         bonus = 0.0
 
-        if position_key not in self.visited_positions:
-            bonus += self.reward_config['exploration_bonus']
-            if step_count < 50:
-                bonus += self.reward_config['new_zone_bonus']
+        # === COVERAGE BONUS (seul signal d'exploration) ===
+        # +coverage_weight par cellule nouvelle dans cet épisode uniquement.
+        # visited_positions (global) n'est plus effacé → exploration_bonus retiré.
+        if position_key not in self._episode_visited:
+            bonus += self.coverage_weight
 
-        coverage = len(self.visited_positions) / (self.grid_size[0] * self.grid_size[1])
-        bonus += coverage * self.reward_config['coverage_bonus'] * 1000
+        # Marquer la cellule comme visitée cet épisode
+        self._episode_visited.add(position_key)
 
-        if step_count > 10 and self.minerals_collected > 0:
-            efficiency = self.minerals_collected / max(step_count, 1)
-            bonus += efficiency * self.reward_config['efficiency_bonus'] * 100
-
+        # === STEP PENALTY ===
         bonus += self.reward_config['step_penalty']
+
+        # === ANTI-LOOP ===
+        self._recent_positions.append(position_key)
+        loop_count = list(self._recent_positions).count(position_key)
+        if loop_count >= 3:
+            bonus -= 0.5  # -2.0 → -0.5 : ratio 1:1 avec coverage_weight, évite reward négatif
 
         return bonus
 
-    def _update_gaussian_diffusion(self):
-        """Applique la diffusion gaussienne académique"""
-        self.gaussian_step += 1
-
-        if self.gaussian_step % self.reward_config['gaussian_update_freq'] == 0:
-            sigma = self.reward_config['gaussian_sigma']
-            self.academic_heatmap = gaussian_filter(self.academic_heatmap, sigma=sigma)
-
-            regeneration_rate = 0.05
-            mask = np.random.rand(*self.academic_heatmap.shape) < regeneration_rate
-            self.academic_heatmap[mask] = np.minimum(1.0, self.academic_heatmap[mask] + 0.1)
-
-            positions_to_remove = []
-            for pos in self.cleaned_positions:
-                x, y = pos
-                if 0 <= y < self.grid_size[0] and 0 <= x < self.grid_size[1]:
-                    if np.random.random() < 0.1:
-                        positions_to_remove.append(pos)
-                        self.academic_heatmap[y, x] = np.random.random() * 0.5
-
-            for pos in positions_to_remove:
-                self.cleaned_positions.remove(pos)
-
     def _update_tracking(self, position_key, is_new_position, found_mineral):
-        """Met à jour le suivi"""
+        """Met à jour le suivi global des positions visitées."""
         if is_new_position and position_key not in self.visited_positions:
             self.visited_positions.add(position_key)
             self.unique_positions_count += 1
 
     def get_statistics(self):
-        """Retourne les statistiques complètes académiques"""
-        avg_concentration = np.mean(self.concentration_history) if self.minerals_collected > 0 else 0.0
+        """Retourne les statistiques complètes."""
+        avg_concentration = (np.mean(self.concentration_history)
+                             if self.minerals_collected > 0 else 0.0)
         coverage = len(self.visited_positions) / (self.grid_size[0] * self.grid_size[1]) * 100
         total_cells = self.grid_size[0] * self.grid_size[1]
         current_priority_sum = np.sum(self.academic_heatmap)
@@ -253,6 +249,7 @@ class RealMineralRewardSystem:
             'academic_reward': self.academic_reward_total,
             'real_reward': self.real_reward_total,
             'visited_positions': len(self.visited_positions),
+            'episode_visited': len(self._episode_visited),
             'coverage_percentage': coverage,
             'cleanliness_percentage': cleanliness_percentage,
             'avg_mineral_concentration': avg_concentration,
@@ -264,23 +261,53 @@ class RealMineralRewardSystem:
         }
 
     def reset_episode(self):
-        """Réinitialise pour un nouvel épisode (conserve l'apprentissage)"""
+        """
+        Réinitialise pour un nouvel épisode.
+        _episode_visited est remis à zéro → le coverage bonus repart à 0
+        pour toutes les cellules au début de chaque épisode.
+
+        Fix A : visited_positions N'est PAS effacé — il accumule les cellules
+        visitées sur toute la vie du robot pour le suivi global (coverage %).
+        L'effacement causait une inflation des rewards pendant l'exploration.
+        """
         self.episode_rewards.append(self.total_reward)
         self.total_reward = 0.0
         self.academic_reward_total = 0.0
         self.real_reward_total = 0.0
-        self.visited_positions.clear()
+        # visited_positions intentionnellement conservé (Fix A)
         self.cleaned_positions.clear()
+        self.mineral_positions_set.clear()
+        self.minerals_collected = 0
+        self.mineral_positions = []
         self.unique_positions_count = 0
         self.steps_without_mineral = 0
         self.total_steps = 0
         self.gaussian_step = 0
 
-        regeneration = np.random.rand(*self.academic_heatmap.shape) * 0.3
-        self.academic_heatmap = np.minimum(1.0, self.academic_heatmap + regeneration)
+        # Reset coverage et tracking
+        self.visit_counts.clear()
+        self._recent_positions.clear()
+        self._episode_visited.clear()  # reset coverage par épisode
+
+        # Reset composantes reward pour le prochain épisode
+        self._ep_mineral  = 0.0
+        self._ep_coverage = 0.0
+        self._ep_penalty  = 0.0
+
+    def get_episode_reward_components(self):
+        """Retourne les composantes du reward accumulées sur l'épisode.
+
+        Appelé par l'agent avant reset_episode() pour envoyer au trainer
+        (TensorBoard Reward/Mineral, Reward/Coverage, Reward/Penalty).
+        """
+        return {
+            'mineral':  round(self._ep_mineral,  3),
+            'coverage': round(self._ep_coverage, 3),
+            'penalty':  round(self._ep_penalty,  3),
+        }
 
     def get_reward_breakdown(self, position, concentrations):
-        """Retourne la décomposition détaillée des récompenses"""
+        """Retourne la décomposition détaillée des récompenses."""
         x, y = position
         position_key = (int(x), int(y))
 
@@ -298,5 +325,6 @@ class RealMineralRewardSystem:
             'real_potential': max_concentration * self.reward_config['mineral_base_reward'],
             'is_cleaned': position_key in self.cleaned_positions,
             'is_visited': position_key in self.visited_positions,
+            'is_visited_this_episode': position_key in self._episode_visited,
             'gaussian_updates': self.gaussian_step // self.reward_config['gaussian_update_freq'],
         }
