@@ -35,3 +35,23 @@ tensorboard :
 cd /media/sojavola/SOJAVOLA1/STAGE/stage_M2_PRISMALAB/projet/ree_robotics_qmix
 tensorboard --logdir logs/tensorboard
 
+# Communication robot 0 (vecteur 32D envoyé aux autres)
+ros2 topic echo /qmix/comm/robot_0
+
+# Communication robot 1
+ros2 topic echo /qmix/comm/robot_1
+
+# Voir la fréquence de publication
+ros2 topic hz /qmix/comm/robot_0
+
+# Voir toutes les communications en même temps (4 terminaux séparés)
+ros2 topic echo /qmix/comm/robot_0 &
+ros2 topic echo /qmix/comm/robot_1 &
+ros2 topic echo /qmix/comm/robot_2 &
+ros2 topic echo /qmix/comm/robot_3 &
+
+# Voir juste le header (timestamp, pas les 32 valeurs)
+ros2 topic echo /qmix/comm/robot_0 --no-arr
+
+ros2 topic echo /robot_0/status
+ros2 topic echo /robot_1/status

@@ -57,11 +57,13 @@ class AdvancedMineralGenerator:
         }
 
     # ──────────────────────────────────────────────────────────────────
-    def generate_geological_map(self, seed=0):
+    def generate_geological_map(self, seed=None):
         """Génère la carte minérale. Même seed = même carte."""
-        # Fix D : ré-initialiser le RNG local avec le seed fourni (reproducibilité)
-        # sans toucher au générateur global NumPy
-        self.rng = np.random.default_rng(seed)
+        # Utiliser le seed fourni; si None, le RNG de l'instance (initialisé dans __init__) est conservé.
+        # BUG FIX : le défaut était seed=0, ce qui réinitialisait TOUJOURS le RNG à 0 et produisait
+        # la même carte à chaque épisode, quelle que soit la graine passée au constructeur.
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
         mineral_map = np.zeros((self.height, self.width, len(self.mineral_types)))
 
         for idx, (name, props) in enumerate(self.mineral_types.items()):

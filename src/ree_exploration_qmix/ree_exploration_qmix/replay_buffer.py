@@ -81,7 +81,8 @@ class QMIXReplayBuffer:
 
         for ep in episodes:
             for i in range(self.num_robots):
-                maps = self._pad_to(ep['mineral_maps'][i], max_len)
+                # float32 : reconvertit depuis float16 stocké en mémoire
+                maps = np.array(self._pad_to(ep['mineral_maps'][i], max_len), dtype=np.float32)
                 pos  = self._pad_to(ep['positions'][i],    max_len)
                 act  = self._pad_to(ep['actions'][i],      max_len, pad_value=-1)
                 rew  = self._pad_to(ep['rewards'][i],      max_len)
@@ -92,7 +93,8 @@ class QMIXReplayBuffer:
                 rewards[i].append(torch.FloatTensor(rew).to(device))
 
                 if has_regional and 'regional_maps' in ep:
-                    reg = self._pad_to(ep['regional_maps'][i], max_len)
+                    # float32 : reconvertit depuis float16 stocké en mémoire
+                    reg = np.array(self._pad_to(ep['regional_maps'][i], max_len), dtype=np.float32)
                     regional_maps[i].append(torch.FloatTensor(reg).to(device))
                 elif has_regional:
                     dummy = np.zeros_like(maps)

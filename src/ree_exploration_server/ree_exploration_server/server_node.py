@@ -330,7 +330,9 @@ class REEExplorationServer(Node):
                 self.mineral_generator = AdvancedMineralGenerator(
                     self.map_width, self.map_height, seed=new_seed
                 )
-                self.mineral_map = self.mineral_generator.generate_geological_map()
+                # BUG FIX : passer new_seed explicitement — sans ça, generate_geological_map()
+                # réinitialisait toujours son RNG à seed=0, produisant la même carte à chaque épisode.
+                self.mineral_map = self.mineral_generator.generate_geological_map(seed=new_seed)
                 self.underground_layers = (
                     self.mineral_generator.generate_underground_layers(
                         self.mineral_map, num_layers=3
@@ -465,39 +467,57 @@ class REEExplorationServer(Node):
     
     
     def publish_status(self):
-        """Publie le statut du système"""
-        with self.lock:
-            coverage = np.mean(self.exploration_map) * 100
-            
-            if self.generator_type == 'advanced':
-                mineral_stats = f"REE: {np.sum(self.mineral_map > 0.3):,} cells"
-                clusters_info = f"Clusters: {self.analyze_cluster_count()}"
-            else:
-                mineral_density = np.mean(self.mineral_map) * 100
-                mineral_stats = f"Density: {mineral_density:.1f}%"
-                clusters_info = ""
-            
-            active_robots = len(self.robot_positions)
-            
+        """Publie le statut du système.
+
+        IMPORTANT : cette fonction ne doit PAS appeler detect_mineral_clusters()
+        ni aucune autre opération longue. Le serveur utilise un exécuteur
+        single-thread : toute opération lente dans un callback bloque TOUS les
+        autres callbacks (publish_maps inclus). Avec l'ancienne implémentation,
+        detect_mineral_clusters() bloquait le thread pendant ~165s, empêchant
+        publish_maps() de s'exécuter → les agents recevaient mineral_map=0 après
+        reset → make_decision() retournait → trainer sans steps → CSV arrêté.
+        """
+        try:
+            with self.lock:
+                coverage = np.mean(self.exploration_map) * 100
+                active_robots = len(self.robot_positions)
+                if self.generator_type == 'advanced':
+                    mineral_cells = int(np.sum(self.mineral_map > 0.3))
+                    mineral_stats = f"REE: {mineral_cells:,} cells"
+                else:
+                    mineral_density = np.mean(self.mineral_map) * 100
+                    mineral_stats = f"Density: {mineral_density:.1f}%"
+
             status_text = (f"System | Robots: {active_robots} | "
-                          f"Coverage: {coverage:.1f}% | "
-                          f"{mineral_stats}")
-            
-            if clusters_info:
-                status_text += f" | {clusters_info}"
-        
-        status_msg = String()
-        status_msg.data = status_text
-        self.status_pub.publish(status_msg)
-        
-        # Log périodique
+                           f"Coverage: {coverage:.1f}% | "
+                           f"{mineral_stats}")
+
+            status_msg = String()
+            status_msg.data = status_text
+            self.status_pub.publish(status_msg)
+
+        except Exception as e:
+            self.get_logger().error(f'publish_status error: {e}')
+            return
+
         if hasattr(self, 'status_counter'):
             self.status_counter += 1
         else:
             self.status_counter = 0
-            
-        if self.status_counter % 6 == 0:  # Toutes les 30 secondes environ
-            self.get_logger().info(f'📊 {status_text}')
+
+        if self.status_counter % 6 == 0:
+            self.get_logger().info(f'Status: {status_text}')
+
+    def _count_clusters(self, generator, mineral_map_snapshot):
+        """Compte rapide des clusters — appelé HORS du self.lock pour ne pas bloquer le thread."""
+        if generator is None:
+            return "N/A"
+        total = 0
+        for mineral_idx in range(4):
+            clusters = generator.detect_mineral_clusters(
+                mineral_map_snapshot, mineral_idx, min_samples=3, eps=2.0)
+            total += len(clusters)
+        return str(total)
     
     def analyze_cluster_count(self):
         """Compte rapide des clusters"""

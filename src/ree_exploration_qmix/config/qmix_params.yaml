@@ -2,10 +2,18 @@
 qmix:
   # Paramètres d'entraînement
   gamma: 0.995
-  learning_rate: 0.00001     # 5e-5 → 1e-5 : stabilise GradNorm (était ~3000)
-  buffer_size: 200           # 80→200 : évite catastrophic forgetting (les vieux bons épisodes restent en mémoire)
-  batch_size: 16             # 8→16 : réduit variance des gradients, RAM disponible = 16 GB
-  target_update_freq: 50     # 100→50 : cible suit mieux → réduit dérive des Q-values
+  learning_rate: 0.000005    # 1e-5 → 5e-6 : loss à 17 → chaque update trop grand.
+                             # Halver le LR réduit l'amplitude des corrections mal dirigées.
+                             # Re-augmenter à 1e-5 quand loss < 5 stabilisé.
+  buffer_size: 80            # 200→80 : RAM fix — avec regional_maps (float16 : 75 MB/ep), 200 ep = 15 GB → OOM.
+                             # 80 ep × 75 MB = 6 GB (+ PyTorch ~1 GB + ROS2 ~2 GB = ~9 GB / 16 GB dispo).
+                             # Pour catastrophic forgetting : batch diversifié via epsilon_decay=9000 + train_freq=10.
+  batch_size: 8              # 16→8 : batch_size=16 créait ~2 Go de tenseurs par step
+                             # → training step 134s → CPU starvation → robots à 0.01 steps/s
+                             # → watchdog loop → 0 épisodes. Retour à 8 (step ~67s).
+  target_update_freq: 150    # 50→150 : réseau cible mis à jour moins souvent.
+                             # Empêche le réseau cible de suivre les Q-values divergentes.
+                             # Targets stables = signal TD plus propre = loss qui descend.
   train_freq: 10
   grad_clip: 1.0
   n_steps: 5
@@ -38,7 +46,7 @@ qmix:
   regional_scale: 3
 
   # Communication
-  use_comm: true
+  use_comm: false
   comm_dim: 32
   num_comm_rounds: 1
 

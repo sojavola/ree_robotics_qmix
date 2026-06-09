@@ -20,6 +20,7 @@ Respect CTDE :
   - La monotonie QMIX (IGM) est préservée (hypernetwork inchangé)
 """
 
+import signal
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, ReliabilityPolicy
@@ -38,6 +39,7 @@ import json
 import base64
 import time
 import csv
+import traceback
 from collections import deque
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
@@ -89,6 +91,7 @@ class QMIXTrainerNode(Node):
         # Temps de début d'épisode — pour rejeter les done=True résiduels
         # par critère temporel (plus fiable que le comptage de steps)
         self._episode_start_time = time.time()
+        self._last_episode_complete_time = time.time()  # watchdog épisode (Step 4)
 
         # Compteurs
         self.train_step = 0
@@ -101,8 +104,19 @@ class QMIXTrainerNode(Node):
         # quand episode_count % 5 == 0 par coïncidence sur le compteur chargé du CSV).
         self._session_episodes = 0
 
-        # Fenêtre glissante pour les moving averages
-        self._reward_window = deque(maxlen=10)
+        # Fenêtres glissantes MA-50 (désactivé — utiliser le slider Smoothing de TensorBoard)
+        self._reward_window    = deque(maxlen=50)
+        # self._minerals_window  = deque(maxlen=50)
+        # self._mineral_r_window = deque(maxlen=50)
+        # self._coverage_window  = deque(maxlen=50)
+        # self._penalty_window   = deque(maxlen=50)
+        # self._loss_window      = deque(maxlen=50)
+        # self._gradnorm_window  = deque(maxlen=50)
+        # self._qtot_window      = deque(maxlen=50)
+        # self._eval_window      = deque(maxlen=50)
+        # self._eval_rps_window  = deque(maxlen=50)
+        # self._robot_r_windows  = [deque(maxlen=50) for _ in range(4)]
+        # self._robot_m_windows  = [deque(maxlen=50) for _ in range(4)]
 
         # === EVAL SPLIT ===
         self.eval_freq = 20
@@ -181,11 +195,14 @@ class QMIXTrainerNode(Node):
         )
 
         # Timeout de synchronisation : détecte les robots bloqués
-        # Fix F : réduit de 360s → 120s (2min max avant watchdog)
-        # Justification : épisode = 150s max ; un robot silencieux depuis 120s
-        # est bloqué, pas juste lent. Le timer watchdog (3s) est plus réactif.
+        # Fix 5b : augmenté 120s → 400s.
+        # Justification : batch_size=16 sur CPU → training step ~120-134s.
+        # Pendant le calcul PyTorch, tous les robots sont CPU-starved et font
+        # 0.01 steps/s. Avec 120s, le watchdog se déclenchait SYSTÉMATIQUEMENT,
+        # resetant mineral_map=0 et bloquant make_decision en boucle infinie.
+        # 400s = 1 épisode complet (300s) + 100s de marge → aucun faux positif.
         self._last_robot_time = {i: time.time() for i in range(self.config.num_robots)}
-        self._sync_timeout = 120.0
+        self._sync_timeout = 400.0
 
         # Timers
         self.train_timer = self.create_timer(
@@ -231,12 +248,34 @@ class QMIXTrainerNode(Node):
         # Continuous learning
         self._load_checkpoint_if_exists()
 
+        # C-3 — SIGTERM handler : sauvegarde le checkpoint avant que ROS2
+        # ou le système ne tue le process. Évite de perdre les poids et
+        # l'epsilon en cas d'arrêt forcé (systemd, OOM killer, ros2 lifecycle).
+        signal.signal(signal.SIGTERM, self._on_sigterm)
+
         self.get_logger().info(
             f'QMIX Trainer initialized '
             f'[MultiScale={self.config.use_multi_scale}, '
             f'Comm={self.config.use_comm}, '
             f'CoverageWeight={self.config.coverage_weight}]'
         )
+
+    # ══════════════════════════════════════════════════════════════════
+    #  GESTION SIGNAUX
+    # ══════════════════════════════════════════════════════════════════
+
+    def _on_sigterm(self, signum, frame):
+        """Sauvegarde d'urgence sur SIGTERM avant mort du process."""
+        self.get_logger().warn(
+            f'[C-3] SIGTERM reçu (train_step={self.train_step}, '
+            f'ep={self.episode_count}, eps={self.epsilon:.4f}) '
+            f'— sauvegarde checkpoint...'
+        )
+        try:
+            self.save_checkpoint()
+            self.writer.flush()
+        except Exception as e:
+            self.get_logger().error(f'SIGTERM save error: {e}')
 
     # ══════════════════════════════════════════════════════════════════
     #  INITIALISATION
@@ -402,8 +441,18 @@ class QMIXTrainerNode(Node):
         try:
             self.qmix_network.load_state_dict(checkpoint['qmix_state_dict'])
             self.target_network.update(self.qmix_network)
+            # FIX 1 — Reset Adam : les moments (m, v) accumulés depuis les crashs
+            # poussent les gradients dans la mauvaise direction (loss 17→ explosion).
+            # On garde les POIDS réseau et on repart avec un Adam frais.
+            # La loss doit redescendre de ~17 à ~3-5 en quelques dizaines de steps.
+            # Re-activer la ligne ci-dessous UNIQUEMENT après stabilisation de la loss
+            # sous 5 pendant 50+ training steps consécutifs.
             if 'optimizer_state_dict' in checkpoint:
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                self.get_logger().warn(
+                    '[FIX-1] Optimizer Adam réinitialisé — momentum corrompu '
+                    f'par crashs précédents ignoré (loss était ~17)'
+                )
+                # self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             self.train_step = checkpoint.get('train_step', 0)
             self.episode_count = checkpoint.get('episode_count', 0)
             self.global_step = checkpoint.get('global_step', 0)
@@ -488,11 +537,11 @@ class QMIXTrainerNode(Node):
             if self._robot_done.get(robot_id, False):
                 return
 
-            # Observation locale (décodage base64)
+            # Observation locale (décodage base64) — float16 : 3.8 MB/ep au lieu de 7.7 MB/ep
             self.current_episode['mineral_maps'][robot_id].append(
                 self._b64_to_arr(
                     step_data['mineral_map'], (obs_size, obs_size, n_ch)
-                ).transpose(2, 0, 1)
+                ).transpose(2, 0, 1).astype(np.float16)
             )
             self.current_episode['positions'][robot_id].append(
                 step_data['position']
@@ -512,14 +561,14 @@ class QMIXTrainerNode(Node):
                     step_data['reward_components']
                 )
 
-            # Multi-scale : observation régionale (décodage base64)
+            # Multi-scale : observation régionale (décodage base64) — float16 : 34 MB/ep au lieu de 69 MB/ep
             if (self.config.use_multi_scale and
                     'regional_map' in step_data and
                     'regional_maps' in self.current_episode):
                 self.current_episode['regional_maps'][robot_id].append(
                     self._b64_to_arr(
                         step_data['regional_map'], (obs_size, obs_size, n_ch)
-                    ).transpose(2, 0, 1)
+                    ).transpose(2, 0, 1).astype(np.float16)
                 )
 
             # Fix G — détection done par step count (pas par flag done).
@@ -636,6 +685,36 @@ class QMIXTrainerNode(Node):
                 })
                 self.episode_reset_pub.publish(reset_msg)
                 return
+
+        # Step 4 — épisode bloqué : aucun robot individuel n'est silencieux (robots actifs)
+        # MAIS l'épisode dure plus de 2× sa durée théorique (300s vs ~150s théorique).
+        # Causes possibles : _end_episode() excepté silencieusement, _robot_done bloqué,
+        # ou logic bug. Force le reset pour débloquer la boucle d'entraînement.
+        _EPISODE_STALL_TIMEOUT = 300.0
+        _episode_duration = now - self._episode_start_time
+        if _episode_duration > _EPISODE_STALL_TIMEOUT and self.global_step > 50:
+            _mx_free = self._end_episode_mutex.acquire(blocking=False)
+            if _mx_free:
+                self._end_episode_mutex.release()
+            self.get_logger().error(
+                f'[WATCHDOG-STALL] Épisode bloqué depuis {_episode_duration:.0f}s '
+                f'(global_step={self.global_step}, ep={self.episode_count}, '
+                f'mutex_locked={not _mx_free}) — force reset'
+            )
+            self.current_episode = self._init_episode_buffer()
+            self.global_step = 0
+            self._robot_done = {j: False for j in range(self.config.num_robots)}
+            self._last_robot_time = {j: now for j in range(self.config.num_robots)}
+            self._episode_start_time = now
+            stall_msg = String()
+            stall_msg.data = json.dumps({
+                'episode': self.episode_count,
+                'watchdog': True,
+                'stall': True,
+                'duration': round(_episode_duration, 1),
+                'timestamp': time.time()
+            })
+            self.episode_reset_pub.publish(stall_msg)
 
     def _end_episode(self):
         # Fix I (O-2) — garde non-réentrant : _end_episode() s'exécute au plus
@@ -765,14 +844,25 @@ class QMIXTrainerNode(Node):
                 return  # buffer + _robot_done déjà réinitialisés en haut de _end_episode
 
             # === MODE ENTRAÎNEMENT ===
-            with self._replay_lock:
-                self.replay_buffer.add_episode(episode_data)
+            # FIX 2 — Exclure les épisodes catastrophiques du buffer en temps réel.
+            # Seuil identique à _load_replay_buffer() : reward < -400.
+            _MIN_BUFFER_REWARD = -400.0
+            if total_reward >= _MIN_BUFFER_REWARD:
+                with self._replay_lock:
+                    self.replay_buffer.add_episode(episode_data)
+            else:
+                self.get_logger().warn(
+                    f'[FIX-2] Épisode exclu du buffer '
+                    f'(reward={total_reward:.0f} < {_MIN_BUFFER_REWARD}) '
+                    f'— boucle de mort évitée'
+                )
             self.episode_count += 1
+            self._last_episode_complete_time = time.time()
 
             self._log_episode_csv(episode_data, total_reward)
 
             self._reward_window.append(total_reward)
-            ma10 = float(np.mean(self._reward_window))
+            ma50 = float(np.mean(self._reward_window))
 
             robot_rewards = [float(np.sum(rew)) for rew in episode_data['rewards']]
             minerals_per_robot = [
@@ -782,18 +872,25 @@ class QMIXTrainerNode(Node):
 
             # TensorBoard — métriques générales
             ep = self.episode_count
-            self.writer.add_scalar('Episode/TotalReward', total_reward, ep)
-            self.writer.add_scalar('Episode/TotalReward_MA10', ma10, ep)
-            self.writer.add_scalar(
-                'Episode/AvgReward', total_reward / max(steps, 1), ep
-            )
-            self.writer.add_scalar('Episode/Steps', steps, ep)
-            self.writer.add_scalar('Episode/Epsilon', self.epsilon, ep)
-            self.writer.add_scalar('Episode/BufferSize', len(self.replay_buffer), ep)
-            self.writer.add_scalar('Episode/MineralsDetected', total_minerals, ep)
+            # self._minerals_window.append(total_minerals)
+            self.writer.add_scalar('Episode/TotalReward',      total_reward, ep)
+            self.writer.add_scalar('Episode/TotalReward_MA50', ma50,         ep)
+            # self.writer.add_scalar('Episode/AvgReward_MA50', ma50 / max(steps, 1), ep)
+            self.writer.add_scalar('Episode/Steps',    steps,                          ep)
+            self.writer.add_scalar('Episode/Epsilon',  self.epsilon,                   ep)
+            self.writer.add_scalar('Episode/BufferSize', len(self.replay_buffer),      ep)
+            self.writer.add_scalar('Episode/MineralsDetected',      total_minerals,    ep)
+            # self.writer.add_scalar('Episode/MineralsDetected_MA50',
+            #                        float(np.mean(self._minerals_window)), ep)
             for i, (rr, mn) in enumerate(zip(robot_rewards, minerals_per_robot)):
-                self.writer.add_scalar(f'Robots/Robot{i}_Reward', rr, ep)
+                # self._robot_r_windows[i].append(rr)
+                # self._robot_m_windows[i].append(mn)
+                self.writer.add_scalar(f'Robots/Robot{i}_Reward',   rr, ep)
+                # self.writer.add_scalar(f'Robots/Robot{i}_Reward_MA50',
+                #                        float(np.mean(self._robot_r_windows[i])), ep)
                 self.writer.add_scalar(f'Robots/Robot{i}_Minerals', mn, ep)
+                # self.writer.add_scalar(f'Robots/Robot{i}_Minerals_MA50',
+                #                        float(np.mean(self._robot_m_windows[i])), ep)
 
             # ── TensorBoard — Reward components (Priorité 4) ──────────
             rc = episode_snapshot.get('reward_components', {})
@@ -801,9 +898,18 @@ class QMIXTrainerNode(Node):
                 total_mineral  = sum(rc[i]['mineral']  for i in range(self.config.num_robots))
                 total_coverage = sum(rc[i]['coverage'] for i in range(self.config.num_robots))
                 total_penalty  = sum(rc[i]['penalty']  for i in range(self.config.num_robots))
+                # self._mineral_r_window.append(total_mineral)
+                # self._coverage_window.append(total_coverage)
+                # self._penalty_window.append(total_penalty)
                 self.writer.add_scalar('Reward/Mineral',  total_mineral,  ep)
                 self.writer.add_scalar('Reward/Coverage', total_coverage, ep)
                 self.writer.add_scalar('Reward/Penalty',  total_penalty,  ep)
+                # self.writer.add_scalar('Reward/Mineral_MA50',
+                #                        float(np.mean(self._mineral_r_window)), ep)
+                # self.writer.add_scalar('Reward/Coverage_MA50',
+                #                        float(np.mean(self._coverage_window)), ep)
+                # self.writer.add_scalar('Reward/Penalty_MA50',
+                #                        float(np.mean(self._penalty_window)), ep)
 
             # ── TensorBoard — CONTRIBUTION 2 : Communication ──────────
             if self.config.use_comm:
@@ -880,18 +986,34 @@ class QMIXTrainerNode(Node):
             # buffer + _robot_done déjà réinitialisés en haut de _end_episode
 
         except Exception as e:
-            self.get_logger().error(f'Error ending episode: {e}')
+            self.get_logger().error(
+                f'Error ending episode (ep={self.episode_count}): {e}\n'
+                f'{traceback.format_exc()}'
+            )
         finally:
             # Fix G (Change 3) + Fix I (O-2) — dans TOUS les cas :
             # 1. Publier le reset si pas encore fait (agents attendent 45s sinon)
             # 2. Libérer le mutex (couvre early returns Fix H + exceptions)
+            # IMPORTANT : publish() est dans son propre try/except pour garantir
+            # que release() est TOUJOURS atteint même si DDS est indisponible.
+            # Sans ce guard, une exception publish() verrouille le mutex à jamais.
             if not _reset_published:
-                _fb = String()
-                _fb.data = json.dumps({
-                    'episode': self.episode_count,
-                    'timestamp': time.time()
-                })
-                self.episode_reset_pub.publish(_fb)
+                try:
+                    _fb = String()
+                    _fb.data = json.dumps({
+                        'episode': self.episode_count,
+                        'timestamp': time.time()
+                    })
+                    self.episode_reset_pub.publish(_fb)
+                    self.get_logger().warn(
+                        f'[finally] reset publié ep={self.episode_count} '
+                        f'(exception dans _end_episode)'
+                    )
+                except Exception as _pub_err:
+                    self.get_logger().error(
+                        f'[CRITICAL] finally publish failed: {_pub_err} — '
+                        f"agents bloqués jusqu'au watchdog (45s)"
+                    )
             self._end_episode_mutex.release()
 
     # ══════════════════════════════════════════════════════════════════
@@ -931,9 +1053,15 @@ class QMIXTrainerNode(Node):
         except Exception as e:
             self.get_logger().error(f'CSV eval log error: {e}')
 
-        self.writer.add_scalar('Eval/AvgReward', avg_reward, self.eval_round)
-        self.writer.add_scalar('Eval/AvgRewardPerStep', avg_rps, self.eval_round)
-        self.writer.add_scalar('Eval/AvgSteps', avg_steps, self.eval_round)
+        # self._eval_window.append(avg_reward)
+        # self._eval_rps_window.append(avg_rps)
+        self.writer.add_scalar('Eval/AvgReward',        avg_reward, self.eval_round)
+        # self.writer.add_scalar('Eval/AvgReward_MA50',
+        #                        float(np.mean(self._eval_window)), self.eval_round)
+        self.writer.add_scalar('Eval/AvgRewardPerStep', avg_rps,    self.eval_round)
+        # self.writer.add_scalar('Eval/AvgRewardPerStep_MA50',
+        #                        float(np.mean(self._eval_rps_window)), self.eval_round)
+        self.writer.add_scalar('Eval/AvgSteps',         avg_steps,  self.eval_round)
 
         self.get_logger().info(
             f'=== EVALUATION #{self.eval_round} terminee === '
@@ -979,6 +1107,19 @@ class QMIXTrainerNode(Node):
 
             self.train_step += 1
 
+            # C-1 — Decay epsilon par pas d'entraînement (pas recomputation).
+            # Avant : publish_epsilon() recalculait depuis epsilon_start chaque
+            # 5s → si le checkpoint chargé avait epsilon=0.05 mais train_step
+            # faible, epsilon remontait vers 1.0 au premier appel timer.
+            # Maintenant : décroissance incrémentale depuis la valeur courante
+            # → l'epsilon chargé du checkpoint est TOUJOURS respecté.
+            _eps_decay = (
+                (self.config.epsilon_start - self.config.epsilon_end)
+                / max(1, self.config.epsilon_decay)
+            )
+            self.epsilon = max(self.config.epsilon_end,
+                               self.epsilon - _eps_decay)
+
             # Target network update
             if self.train_step % self.config.target_update_freq == 0:
                 self.target_network.update(self.qmix_network)
@@ -990,11 +1131,17 @@ class QMIXTrainerNode(Node):
             self._log_training_csv(loss.item())
 
             ts = self.train_step
-            self.writer.add_scalar('Train/Loss', loss.item(), ts)
-            self.writer.add_scalar('Train/Epsilon', self.epsilon, ts)
-            self.writer.add_scalar('Train/GradNorm', grad_norm, ts)
-            self.writer.add_scalar('Train/QTot_Mean', q_tot_mean, ts)
-            self.writer.add_scalar('Train/QTot_Std', q_tot_std, ts)
+            # self._loss_window.append(loss.item())
+            # self._gradnorm_window.append(grad_norm)
+            # self._qtot_window.append(q_tot_mean)
+            self.writer.add_scalar('Train/Loss',      loss.item(), ts)
+            # self.writer.add_scalar('Train/Loss_MA50', float(np.mean(self._loss_window)), ts)
+            self.writer.add_scalar('Train/Epsilon',   self.epsilon, ts)
+            self.writer.add_scalar('Train/GradNorm',  grad_norm,   ts)
+            # self.writer.add_scalar('Train/GradNorm_MA50', float(np.mean(self._gradnorm_window)), ts)
+            self.writer.add_scalar('Train/QTot_Mean', q_tot_mean,  ts)
+            # self.writer.add_scalar('Train/QTot_Mean_MA50', float(np.mean(self._qtot_window)), ts)
+            self.writer.add_scalar('Train/QTot_Std',  q_tot_std,   ts)
 
             if self.train_step % 10 == 0:
                 self.get_logger().info(
@@ -1232,21 +1379,11 @@ class QMIXTrainerNode(Node):
             self.get_logger().error(f'Error publishing weights: {e}')
 
     def publish_epsilon(self):
-        if self.is_eval_mode:
-            msg = Float32()
-            msg.data = 0.0
-            self.epsilon_pub.publish(msg)
-            return
-
-        self.epsilon = max(
-            self.config.epsilon_end,
-            self.config.epsilon_start -
-            (self.config.epsilon_start - self.config.epsilon_end) *
-            min(1.0, self.train_step / self.config.epsilon_decay)
-        )
-
+        # C-1 — Ne PAS recalculer epsilon ici.
+        # La décroissance est faite dans train_step_callback (par pas d'entraînement).
+        # Ce timer publie simplement la valeur courante pour les agents.
         msg = Float32()
-        msg.data = float(self.epsilon)
+        msg.data = 0.0 if self.is_eval_mode else float(self.epsilon)
         self.epsilon_pub.publish(msg)
 
     def _save_replay_buffer_bg(self):
@@ -1309,8 +1446,14 @@ class QMIXTrainerNode(Node):
 
             required_keys = {'mineral_maps', 'positions', 'actions',
                              'rewards', 'global_states', 'dones'}
+            # FIX 2 — Seuil de filtrage : épisodes catastrophiques exclus du buffer.
+            # En dessous de ce seuil, la politique converge vers "foncer dans les murs"
+            # (pénalité collision × N steps > tout le reste). Ces épisodes créent une
+            # boucle de mort : mauvaise politique → mauvais épisodes → Q-values pires.
+            _MIN_BUFFER_REWARD = -400.0
             loaded = 0
             skipped = 0
+            filtered_bad = 0
             for ep in episodes:
                 if not isinstance(ep, dict):
                     skipped += 1
@@ -1322,12 +1465,24 @@ class QMIXTrainerNode(Node):
                     )
                     skipped += 1
                     continue
+                # Filtrer les épisodes catastrophiques (boucle de mort)
+                try:
+                    ep_reward = sum(
+                        float(np.sum(ep['rewards'][i]))
+                        for i in range(len(ep['rewards']))
+                    )
+                    if ep_reward < _MIN_BUFFER_REWARD:
+                        filtered_bad += 1
+                        continue
+                except Exception:
+                    pass  # si calcul échoue, charger quand même
                 self.replay_buffer.episodes.append(ep)
                 loaded += 1
 
             self.get_logger().info(
                 f'Replay buffer chargé : {loaded} épisodes restaurés'
                 + (f', {skipped} ignorés (structure invalide)' if skipped else '')
+                + (f', {filtered_bad} filtrés (reward < {_MIN_BUFFER_REWARD})' if filtered_bad else '')
             )
 
         except Exception as e:
@@ -1353,8 +1508,13 @@ class QMIXTrainerNode(Node):
                 'config': self.config.__dict__
             }
 
-            torch.save(data, path)
-            # Atomic write: write to .tmp then rename — survives SIGKILL mid-write.
+            # C-3 — Écriture atomique pour les deux fichiers.
+            # Sans ça, un SIGKILL pendant torch.save() laisse un fichier corrompu.
+            # os.replace() est atomique sur Linux (rename syscall).
+            tmp_numbered = path + '.tmp'
+            torch.save(data, tmp_numbered)
+            os.replace(tmp_numbered, path)
+
             tmp_path = latest_path + '.tmp'
             torch.save(data, tmp_path)
             os.replace(tmp_path, latest_path)

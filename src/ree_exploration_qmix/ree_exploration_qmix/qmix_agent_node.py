@@ -222,13 +222,13 @@ class QMIXAgentNode(Node):
 
         # Timers
         self.decision_timer  = self.create_timer(
-            0.5, self.make_decision, callback_group=self._cb_decision
+            0.2, self.make_decision, callback_group=self._cb_decision
         )
         self.status_timer    = self.create_timer(
             5.0, self.publish_status, callback_group=self._cb_fast
         )
         self.position_timer  = self.create_timer(
-            0.5, self.publish_position, callback_group=self._cb_fast
+            0.2, self.publish_position, callback_group=self._cb_fast
         )
         self.debug_timer     = self.create_timer(
             30.0, self._debug_state_log, callback_group=self._cb_fast
@@ -478,14 +478,14 @@ class QMIXAgentNode(Node):
             self.discovered_map = np.zeros(
                 (self.map_height, self.map_width, 4), dtype=np.float32
             )
-            # Reset mineral_map à zéros : la nouvelle carte arrive de manière
-            # asynchrone depuis le serveur. Sans ce reset, les 1-3 premiers steps
-            # utilisent l'ancienne carte (race condition /episode_reset vs /mineral_map).
-            # Avec ce reset, l'agent voit 0 mineral jusqu'à réception de la nouvelle
-            # carte → aucun reward basé sur des données périmées.
-            self.mineral_map = np.zeros(
-                (self.map_height, self.map_width, 4), dtype=np.float32
-            )
+            # Fix 5a : NE PAS zéroïser mineral_map au reset.
+            # Ancien comportement : mineral_map=zeros → make_decision bloquait en
+            # "En attente de /mineral_map" jusqu'à la prochaine publication du serveur.
+            # Si le watchdog (sync_timeout) se redéclenchait avant que le serveur publie,
+            # un nouveau reset revenait à zeros → boucle infinie, 0 épisodes.
+            # Nouveau comportement : on garde la carte précédente. Les 1-3 premiers
+            # steps d'un nouvel épisode utilisent l'ancienne carte (légère race-condition
+            # acceptable) mais le robot peut décider immédiatement après chaque reset.
         self.prev_features = None
         self.prev_action = None
 
