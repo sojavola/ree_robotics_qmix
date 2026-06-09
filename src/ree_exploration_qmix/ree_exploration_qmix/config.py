@@ -9,6 +9,9 @@ from typing import Optional
 class QMIXConfig:
     """Configuration pour QMIX (sans ICM — remplacé par coverage bonus)."""
 
+    # Fréquence de décision des agents
+    decision_hz: float = 50.0
+
     # Paramètres d'entraînement
     gamma: float = 0.995
     learning_rate: float = 0.00001    # 1e-5 : stabilise GradNorm
@@ -16,6 +19,7 @@ class QMIXConfig:
     batch_size: int = 8
     target_update_freq: int = 100
     train_freq: int = 10
+    num_updates: int = 4              # gradient steps par déclenchement timer (équivalent N_EPOCHS PPO)
     grad_clip: float = 1.0
     n_steps: int = 5
 
@@ -74,12 +78,14 @@ class QMIXConfig:
         qmix_params = data.get('qmix', {})
 
         config = cls(
+            decision_hz=qmix_params.get('decision_hz', 50.0),
             gamma=qmix_params.get('gamma', 0.995),
             learning_rate=qmix_params.get('learning_rate', 0.00001),
             buffer_size=qmix_params.get('buffer_size', 80),
             batch_size=qmix_params.get('batch_size', 8),
             target_update_freq=qmix_params.get('target_update_freq', 100),
             train_freq=qmix_params.get('train_freq', 10),
+            num_updates=qmix_params.get('num_updates', 4),
             grad_clip=qmix_params.get('grad_clip', 1.0),
             epsilon_start=qmix_params.get('epsilon_start', 1.0),
             epsilon_end=qmix_params.get('epsilon_end', 0.05),

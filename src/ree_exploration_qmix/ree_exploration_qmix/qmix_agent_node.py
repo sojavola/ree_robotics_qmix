@@ -222,7 +222,7 @@ class QMIXAgentNode(Node):
 
         # Timers
         self.decision_timer  = self.create_timer(
-            0.2, self.make_decision, callback_group=self._cb_decision
+            1.0 / self.config.decision_hz, self.make_decision, callback_group=self._cb_decision
         )
         self.status_timer    = self.create_timer(
             5.0, self.publish_status, callback_group=self._cb_fast
@@ -777,7 +777,7 @@ class QMIXAgentNode(Node):
         _elapsed = time.time() - _step_start
         self._latency_history.append(_elapsed)
         self._steps_perf_window += 1
-        if _elapsed > 0.2:
+        if _elapsed > 1.0 / self.config.decision_hz:
             self.get_logger().warn(
                 f'[Robot {self.robot_id}] Decision latency: {_elapsed*1000:.0f}ms '
                 f'(obs={self._last_obs_ms:.0f}ms fwd={self._last_fwd_ms:.0f}ms '
@@ -1090,7 +1090,7 @@ def main(argv=None):
         # Fix A : MultiThreadedExecutor — _cb_decision sérialisé (état partagé),
         # _cb_fast en parallèle (status, weights, position).
         # 4 threads : 2 groupes × 2 pour absorber les pics de callbacks.
-        executor = MultiThreadedExecutor(num_threads=4)
+        executor = MultiThreadedExecutor(num_threads=8)
         executor.add_node(node)
         executor.spin()
     except KeyboardInterrupt:

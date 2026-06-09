@@ -1,27 +1,23 @@
 # Paramètres QMIX
 qmix:
+  # Fréquence de décision des agents (Hz)
+  decision_hz: 50.0
   # Paramètres d'entraînement
   gamma: 0.995
-  learning_rate: 0.000005    # 1e-5 → 5e-6 : loss à 17 → chaque update trop grand.
-                             # Halver le LR réduit l'amplitude des corrections mal dirigées.
-                             # Re-augmenter à 1e-5 quand loss < 5 stabilisé.
-  buffer_size: 80            # 200→80 : RAM fix — avec regional_maps (float16 : 75 MB/ep), 200 ep = 15 GB → OOM.
-                             # 80 ep × 75 MB = 6 GB (+ PyTorch ~1 GB + ROS2 ~2 GB = ~9 GB / 16 GB dispo).
-                             # Pour catastrophic forgetting : batch diversifié via epsilon_decay=9000 + train_freq=10.
-  batch_size: 8              # 16→8 : batch_size=16 créait ~2 Go de tenseurs par step
-                             # → training step 134s → CPU starvation → robots à 0.01 steps/s
-                             # → watchdog loop → 0 épisodes. Retour à 8 (step ~67s).
-  target_update_freq: 150    # 50→150 : réseau cible mis à jour moins souvent.
-                             # Empêche le réseau cible de suivre les Q-values divergentes.
-                             # Targets stables = signal TD plus propre = loss qui descend.
-  train_freq: 10
+  learning_rate: 0.00001     # 5e-6 → 1e-5 : batch_size=32 donne des gradients plus stables → LR peut remonter.
+  buffer_size: 300           # 80 → 300 : serveur 35GB libre — 75MB/ep × 300 = 22GB OK.
+  batch_size: 32             # 8 → 32 : RAM serveur suffisante, gradients 4× plus stables.
+  target_update_freq: 300    # 150 → 300 : train_freq 2× plus fréquent → compense pour garder la même
+                             # fréquence de mise à jour du réseau cible (toutes les ~1500 experiences).
+  train_freq: 5              # 10 → 5 : entraîne 2× plus souvent.
+  num_updates: 4             # gradient steps par déclenchement (équivalent N_EPOCHS=4 PPO).
   grad_clip: 1.0
-  n_steps: 5
+  n_steps: 8                 # 5 → 8 : meilleur signal TD à long terme sur machine rapide.
 
   # Paramètres d'exploration
   epsilon_start: 1.0
   epsilon_end: 0.10          # 0.05→0.10 : plancher permanent d'exploration (évite collapse quand epsilon=0)
-  epsilon_decay: 9000        # 4000→9000 : decay jusqu'à ep ~1550 (était ep ~690 → collapse confirmé)
+  epsilon_decay: 25000       # 9000 → 25000 : 20Hz → ~240 ep/heure → decay jusqu'à ep ~4000.
 
   # Architecture réseau
   hidden_dim: 64

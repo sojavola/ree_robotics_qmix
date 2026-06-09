@@ -1075,72 +1075,57 @@ class QMIXTrainerNode(Node):
     # ══════════════════════════════════════════════════════════════════
 
     def train_step_callback(self):
-        """Effectue un pas d'entraînement QMIX."""
-        # Attendre d'avoir au moins 1 épisode complet dans le buffer
+        """Effectue num_updates pas d'entraînement QMIX par déclenchement timer."""
         if len(self.replay_buffer) < 1:
             return
 
         try:
-            with self._replay_lock:
-                batch = self.replay_buffer.sample_batch()
+            for _ in range(self.config.num_updates):
+                with self._replay_lock:
+                    batch = self.replay_buffer.sample_batch()
 
-            # === 1. Loss QMIX (avec multi-scale + comm) ===
-            loss, q_tot_mean, q_tot_std = self._compute_loss(batch)
+                loss, q_tot_mean, q_tot_std = self._compute_loss(batch)
 
-            # Vérification NaN avant backward — évite de corrompre les poids
-            if not torch.isfinite(loss):
-                self.get_logger().warn(
-                    f'Loss non-finie ({loss.item():.4f}) — skip training step'
+                if not torch.isfinite(loss):
+                    self.get_logger().warn(
+                        f'Loss non-finie ({loss.item():.4f}) — skip training step'
+                    )
+                    break
+
+                self.optimizer.zero_grad()
+                loss.backward()
+
+                grad_norm = 0.0
+                if self.config.grad_clip > 0:
+                    grad_norm = float(torch.nn.utils.clip_grad_norm_(
+                        self.qmix_network.parameters(),
+                        self.config.grad_clip
+                    ))
+                self.optimizer.step()
+
+                self.train_step += 1
+
+                _eps_decay = (
+                    (self.config.epsilon_start - self.config.epsilon_end)
+                    / max(1, self.config.epsilon_decay)
                 )
-                return
+                self.epsilon = max(self.config.epsilon_end,
+                                   self.epsilon - _eps_decay)
 
-            self.optimizer.zero_grad()
-            loss.backward()
+                if self.train_step % self.config.target_update_freq == 0:
+                    self.target_network.update(self.qmix_network)
+                    self.get_logger().info(
+                        f'Target network updated at step {self.train_step}'
+                    )
 
-            grad_norm = 0.0
-            if self.config.grad_clip > 0:
-                grad_norm = float(torch.nn.utils.clip_grad_norm_(
-                    self.qmix_network.parameters(),
-                    self.config.grad_clip  # config.grad_clip devrait être 1.0
-                ))
-            self.optimizer.step()
-
-            self.train_step += 1
-
-            # C-1 — Decay epsilon par pas d'entraînement (pas recomputation).
-            # Avant : publish_epsilon() recalculait depuis epsilon_start chaque
-            # 5s → si le checkpoint chargé avait epsilon=0.05 mais train_step
-            # faible, epsilon remontait vers 1.0 au premier appel timer.
-            # Maintenant : décroissance incrémentale depuis la valeur courante
-            # → l'epsilon chargé du checkpoint est TOUJOURS respecté.
-            _eps_decay = (
-                (self.config.epsilon_start - self.config.epsilon_end)
-                / max(1, self.config.epsilon_decay)
-            )
-            self.epsilon = max(self.config.epsilon_end,
-                               self.epsilon - _eps_decay)
-
-            # Target network update
-            if self.train_step % self.config.target_update_freq == 0:
-                self.target_network.update(self.qmix_network)
-                self.get_logger().info(
-                    f'Target network updated at step {self.train_step}'
-                )
-
-            # Logging
+            # Logging sur le dernier update uniquement
             self._log_training_csv(loss.item())
 
             ts = self.train_step
-            # self._loss_window.append(loss.item())
-            # self._gradnorm_window.append(grad_norm)
-            # self._qtot_window.append(q_tot_mean)
             self.writer.add_scalar('Train/Loss',      loss.item(), ts)
-            # self.writer.add_scalar('Train/Loss_MA50', float(np.mean(self._loss_window)), ts)
             self.writer.add_scalar('Train/Epsilon',   self.epsilon, ts)
             self.writer.add_scalar('Train/GradNorm',  grad_norm,   ts)
-            # self.writer.add_scalar('Train/GradNorm_MA50', float(np.mean(self._gradnorm_window)), ts)
             self.writer.add_scalar('Train/QTot_Mean', q_tot_mean,  ts)
-            # self.writer.add_scalar('Train/QTot_Mean_MA50', float(np.mean(self._qtot_window)), ts)
             self.writer.add_scalar('Train/QTot_Std',  q_tot_std,   ts)
 
             if self.train_step % 10 == 0:
